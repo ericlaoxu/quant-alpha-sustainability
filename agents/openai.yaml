@@ -1,0 +1,5 @@
+interface:
+  display_name: "量化管理人综合能力评估助手"
+  short_description: "基于净值数据对量化管理人做收益进攻、收益质量、风格偏离三维评分与排名"
+  brand_color: "#1F6FEB"
+  default_prompt: "Use $alpha-sustainability-assistant to evaluate quantitative managers 幻方, 九坤, 明汯 over the latest available data from goodluckdata.com, and generate a Markdown report."
