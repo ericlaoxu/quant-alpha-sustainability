@@ -151,7 +151,8 @@
     ├── test_01_full_market.md
     ├── test_02_selected.md
     ├── test_03_historical.md
-    └── AI_Skill_测试报告_v2.pdf
+    ├── AI_Skill_测试报告_v3.pdf
+    └── README_量化管理人综合能力评估助手.pdf
 ```
 
 ---
@@ -163,12 +164,13 @@
 - Python 3.10+
 - requests
 - numpy
-- reportlab（生成 PDF 测试报告时使用）
+- reportlab（生成 PDF 测试报告及 README PDF 时使用）
+- mistune（解析 Markdown 时使用）
 
 安装：
 
 ```bash
-pip install requests numpy reportlab
+pip install requests numpy reportlab mistune
 ```
 
 ### 5.2 运行示例
