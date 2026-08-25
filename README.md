@@ -155,6 +155,7 @@
     ├── test_01_full_market.md
     ├── test_02_selected.md
     ├── test_03_historical.md
+    ├── test_04_workbuddy_full_market.md
     ├── AI_Skill_测试报告_v3.pdf
     └── README_量化管理人综合能力评估助手.pdf
 ```
