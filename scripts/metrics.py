@@ -5,6 +5,7 @@
 输出: {"meta":..., "funds":[...], "managers":[...]}
 """
 import math
+from collections import defaultdict
 
 import numpy as np
 
@@ -80,19 +81,22 @@ def _slice_window(series, dates, start_date, end_date):
 
 
 def _percentile_rank(values, higher_is_better=True):
-    """对产品指标做分位数排名，返回 0-100 的分数。
-
-    最高分获得者 100 分，最低分获得者 0 分，中间按分位数线性插值。
-    """
+    """对产品指标做 0-100 线性比例打分：最大值 100 分、最小值 0 分，中间按数值比例线性插值（min-max 映射）。"""
     valid = [(idx, float(v)) for idx, v in enumerate(values) if v is not None]
     if not valid:
         return [None] * len(values)
-    sorted_vals = sorted(valid, key=lambda x: x[1], reverse=higher_is_better)
-    n = len(sorted_vals)
+    vals = [v for _, v in valid]
+    vmin, vmax = min(vals), max(vals)
     out = [None] * len(values)
-    for rank, (idx, _) in enumerate(sorted_vals):
-        # rank 0 -> 100, rank n-1 -> 0
-        out[idx] = 100.0 * (n - 1 - rank) / (n - 1) if n > 1 else 100.0
+    if vmax == vmin:
+        for idx, _ in valid:
+            out[idx] = 100.0
+        return out
+    for idx, v in valid:
+        if higher_is_better:
+            out[idx] = 100.0 * (v - vmin) / (vmax - vmin)
+        else:
+            out[idx] = 100.0 * (vmax - v) / (vmax - vmin)
     return out
 
 
@@ -112,12 +116,11 @@ def compute_all(data):
     indices = data.get("indices", {})
     funds = data.get("funds", [])
 
-    # 获取评估区间对应的指数收益序列
-    index_rets = {}
+    # 获取评估区间对应的指数收盘点位序列（累计收益口径：净值 vs 归一化指数点位）
+    index_closes = {}
     for name, closes in indices.items():
         if closes:
-            full_rets = _pct_change(closes)
-            index_rets[name] = _slice_window(full_rets, dates, eval_start, eval_end)
+            index_closes[name] = _slice_window(closes, dates, eval_start, eval_end)
 
     # 为每个产品计算评估区间收益序列与指标
     fund_metrics = []
@@ -128,13 +131,14 @@ def compute_all(data):
             continue
         full_ret = _pct_change(nav)
         eval_ret = _slice_window(full_ret, dates, eval_start, eval_end)
+        eval_nav = _slice_window(nav, dates, eval_start, eval_end)
         eval_excess = None
         if excess:
             eval_excess = _slice_window(excess, dates, eval_start, eval_end)
 
         strategy = f.get("strategy", "")
         benchmark = STRATEGY_BENCHMARK.get(strategy)
-        benchmark_ret = index_rets.get(benchmark) if benchmark else None
+        bench_closes = index_closes.get(benchmark) if benchmark else None
 
         record = {
             "show_name": f["show_name"],
@@ -151,16 +155,22 @@ def compute_all(data):
             record["annual_excess"] = None
             record["excess_sharpe"] = None
 
-        # 与对应基准相关性（风格偏离正项）
-        if benchmark_ret and len(eval_ret) == len(benchmark_ret):
-            record["bench_corr"] = _corr(eval_ret, benchmark_ret)
+        # 与对应基准相关性：优先使用 correlation 接口值（近1年累计口径，含周一/周五相位修正），否则本地计算（净值 vs 归一化指数点位）
+        if f.get("bench_corr") is not None:
+            record["bench_corr"] = f["bench_corr"]
+        elif bench_closes and len(eval_nav) == len(bench_closes) and bench_closes[0]:
+            bench_norm = [x / bench_closes[0] for x in bench_closes]
+            record["bench_corr"] = _corr(eval_nav, bench_norm)
         else:
             record["bench_corr"] = None
 
-        # 与万得小市值相关性（风格偏离扣分项）
-        smallcap_ret = index_rets.get("万得小市值")
-        if smallcap_ret and len(eval_ret) == len(smallcap_ret):
-            record["smallcap_corr"] = _corr(eval_ret, smallcap_ret)
+        # 与万得小市值相关性：优先使用 correlation 接口值，否则本地计算（累计收益口径）
+        smallcap_closes = index_closes.get("万得小市值")
+        if f.get("smallcap_corr") is not None:
+            record["smallcap_corr"] = f["smallcap_corr"]
+        elif smallcap_closes and len(eval_nav) == len(smallcap_closes) and smallcap_closes[0]:
+            small_norm = [x / smallcap_closes[0] for x in smallcap_closes]
+            record["smallcap_corr"] = _corr(eval_nav, small_norm)
         else:
             record["smallcap_corr"] = None
 
@@ -176,34 +186,38 @@ def compute_all(data):
         if len(items) < MIN_MANAGER_PRODUCTS:
             continue
 
-        # 收益进攻评分：300/500/1000/选股产品的近1年年化收益
-        attack_values = [fm["annual_return"] for fm in items
-                         if fm["strategy"] in ("300指增", "500指增", "1000指增", "选股")]
-
-        # 收益质量评分：300/500/1000的超额收益 + 对冲的夏普比率
-        quality_values = []
+        # 收益进攻：300/500/1000/选股的年化收益，按策略线分组（各策略线独立 min-max）
+        attack_by_strategy = defaultdict(list)
         for fm in items:
-            if fm["strategy"] in ("300指增", "500指增", "1000指增") and fm["annual_excess"] is not None:
-                quality_values.append(fm["annual_excess"])
-            elif fm["strategy"] == "对冲":
-                quality_values.append(fm["sharpe"])
+            if fm["strategy"] in ("300指增", "500指增", "1000指增", "选股"):
+                attack_by_strategy[fm["strategy"]].append(fm["annual_return"])
 
-        # 风格偏离评分：300/500/1000的基准相关性与小市值相关性
-        bench_corr_values = [fm["bench_corr"] for fm in items
-                             if fm["strategy"] in ("300指增", "500指增", "1000指增")
-                             and fm["bench_corr"] is not None]
-        smallcap_corr_values = [fm["smallcap_corr"] for fm in items
-                                if fm["strategy"] in ("300指增", "500指增", "1000指增")
-                                and fm["smallcap_corr"] is not None]
+        # 收益质量：指增的信息比率（超额夏普）、对冲的夏普，按策略线分组（同类指标各自 min-max，避免跨量纲混排）
+        quality_by_strategy = defaultdict(list)
+        for fm in items:
+            if fm["strategy"] in ("300指增", "500指增", "1000指增") and fm["excess_sharpe"] is not None:
+                quality_by_strategy[fm["strategy"]].append(fm["excess_sharpe"])
+            elif fm["strategy"] == "对冲" and fm["sharpe"] is not None:
+                quality_by_strategy["对冲"].append(fm["sharpe"])
+
+        # 风格偏离：基准相关性、小市值相关性，按策略线分组
+        bench_by_strategy = defaultdict(list)
+        small_by_strategy = defaultdict(list)
+        for fm in items:
+            if fm["strategy"] in ("300指增", "500指增", "1000指增"):
+                if fm["bench_corr"] is not None:
+                    bench_by_strategy[fm["strategy"]].append(fm["bench_corr"])
+                if fm["smallcap_corr"] is not None:
+                    small_by_strategy[fm["strategy"]].append(fm["smallcap_corr"])
 
         managers.append({
             "manager": manager,
             "n_products": len(items),
             "products": items,
-            "attack_values": attack_values,
-            "quality_values": quality_values,
-            "bench_corr_values": bench_corr_values,
-            "smallcap_corr_values": smallcap_corr_values,
+            "attack_by_strategy": dict(attack_by_strategy),
+            "quality_by_strategy": dict(quality_by_strategy),
+            "bench_by_strategy": dict(bench_by_strategy),
+            "small_by_strategy": dict(small_by_strategy),
         })
 
     return {

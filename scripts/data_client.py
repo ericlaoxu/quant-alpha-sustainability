@@ -30,6 +30,14 @@ STRATEGY_BENCHMARK = {
 VALID_STRATEGIES = ["300指增", "500指增", "1000指增", "选股", "对冲"]
 # 需要拉取的宽基指数
 INDEX_DASHBOARD_NAMES = ["沪深300", "中证500", "中证1000", "中证2000", "万得小市值"]
+# correlation 接口（fund-index 模式）中产品与基准指数的对应关系
+CORR_STRATEGY_BENCH = {
+    "300指增": "沪深300",
+    "500指增": "中证500",
+    "1000指增": "中证1000",
+}
+# correlation 接口相关性窗口（与评估区间一致：近 1 年）
+CORR_TIME_RANGE = "近1年"
 
 DEFAULT_USERNAME = "admin"
 DEFAULT_PASSWORD = "xu753951"
@@ -201,6 +209,55 @@ def _cum_to_weekly(cum_series):
     return out
 
 
+def _fetch_fund_index_corr(session, config, strategy, end_date):
+    """从 /api/longterm/correlation/（fund-index 模式）拉取产品与指数相关性。
+
+    该接口的 indexNames 含「万得小市值指数」，可补齐风格偏离的小市值因子。
+    相关性窗口固定为近 1 年（CORR_TIME_RANGE），与评估区间一致。
+
+    返回:
+        {show_name: {"bench_corr": float, "smallcap_corr": float}}；
+        接口不可用或无匹配指数时返回空字典。
+    """
+    out = {}
+    url = config["base_url"].rstrip("/") + "/api/longterm/correlation/"
+    try:
+        params = {
+            "strategy": strategy,
+            "time_range": CORR_TIME_RANGE,
+            "analysis_mode": "fund-index",
+            "end_date": end_date,
+        }
+        resp = session.get(url, params=params, timeout=config.get("timeout", 30))
+        if resp.status_code != 200:
+            return out
+        body = resp.json()
+        data = body.get("data") or {}
+        names = data.get("indexNames") or []
+        matrix = data.get("matrix") or []
+        fund_names = data.get("fundNames") or []
+        if not names or len(matrix) != len(fund_names):
+            return out
+        bench_name = CORR_STRATEGY_BENCH.get(strategy)
+        bench_idx = names.index(bench_name) if bench_name in names else None
+        small_idx = None
+        for i, n in enumerate(names):
+            if "小市值" in n or "万得" in n:
+                small_idx = i
+                break
+        for fn, row in zip(fund_names, matrix):
+            rec = {}
+            if bench_idx is not None and bench_idx < len(row):
+                rec["bench_corr"] = float(row[bench_idx])
+            if small_idx is not None and small_idx < len(row):
+                rec["smallcap_corr"] = float(row[small_idx])
+            if rec:
+                out[fn] = rec
+    except Exception:
+        pass
+    return out
+
+
 def _resolve_window(user_date=None):
     """解析 2 年数据窗口与 1 年评估窗口。
 
@@ -269,7 +326,23 @@ def fetch_data(managers=None, user_date=None, config=None):
             continue
 
     indices = _fetch_index_series(session, config, dates)
+
+    # 拉取产品与指数相关性（fund-index 模式，近 1 年），补齐基准相关性与万得小市值因子
+    corr_map = {}
+    for strategy in CORR_STRATEGY_BENCH:
+        try:
+            corr_map.update(_fetch_fund_index_corr(session, config, strategy, window_end))
+        except Exception:
+            continue
     session.close()
+
+    # 将相关性回填到 fund（metrics 层优先使用；无接口值时回退本地计算）
+    for f in all_funds:
+        rec = corr_map.get(f["show_name"]) or {}
+        if rec.get("bench_corr") is not None:
+            f["bench_corr"] = rec["bench_corr"]
+        if rec.get("smallcap_corr") is not None:
+            f["smallcap_corr"] = rec["smallcap_corr"]
 
     # 管理人筛选
     if managers:

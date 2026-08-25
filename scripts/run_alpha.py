@@ -60,12 +60,12 @@ def _manager_evidence(m):
 def _product_details(m):
     """生成管理人旗下产品原始指标明细。"""
     lines = []
-    lines.append("| 产品 | 策略 | 年化收益 | 年化超额/夏普 | 基准相关性 | 小市值相关性 |")
+    lines.append("| 产品 | 策略 | 年化收益 | 信息比率/夏普 | 基准相关性 | 小市值相关性 |")
     lines.append("|---|---|---|---|---|---|")
     products = m.get("products", [])
     for p in products:
         strategy = p.get("strategy", "-")
-        qual = p.get("annual_excess") if p.get("annual_excess") is not None else p.get("sharpe")
+        qual = p.get("excess_sharpe") if p.get("excess_sharpe") is not None else p.get("sharpe")
         lines.append("| %s | %s | %s | %s | %s | %s |" % (
             p.get("show_name", "-"), strategy, _pct(p.get("annual_return")),
             _num(qual, 2), _num(p.get("bench_corr"), 3), _num(p.get("smallcap_corr"), 3)))
@@ -90,15 +90,15 @@ def _manager_attribution(m):
                          name, top.get("strategy", "-"),
                          _pct(top.get("annual_return"))))
 
-    # 质量：年化超额最高（指增）或夏普最高（对冲）的产品
+    # 质量：信息比率最高（指增）或夏普最高（对冲）的产品
     quality_ps = []
     for p in products:
-        if p.get("strategy") in ("300指增", "500指增", "1000指增") and p.get("annual_excess") is not None:
-            quality_ps.append((p, "年化超额 %s" % _pct(p.get("annual_excess"))))
+        if p.get("strategy") in ("300指增", "500指增", "1000指增") and p.get("excess_sharpe") is not None:
+            quality_ps.append((p, "信息比率 %.2f" % p.get("excess_sharpe")))
         elif p.get("strategy") == "对冲" and p.get("sharpe") is not None:
             quality_ps.append((p, "夏普比率 %.2f" % p.get("sharpe")))
     if quality_ps:
-        top, metric_desc = max(quality_ps, key=lambda x: x[0].get("annual_excess") if x[0].get("annual_excess") is not None else x[0].get("sharpe", 0))
+        top, metric_desc = max(quality_ps, key=lambda x: x[0].get("excess_sharpe") if x[0].get("excess_sharpe") is not None else x[0].get("sharpe", 0))
         lines.append("- **收益质量（%.1f 分）**：%s·%s 的 %s 表现最强，"
                      "支撑质量分排名。" % (
                          m.get("quality_score") or 0,
@@ -168,9 +168,9 @@ def render_report(result):
     lines.append("")
     lines.append("## 二、评分规则")
     lines.append("")
-    lines.append("1. **收益进攻评分**：300/500/1000指增及选股产品的近1年年化收益，全市场分位数排名（第一 100 分，最后 0 分）。")
-    lines.append("2. **收益质量评分**：300/500/1000指增的近1年年化超额收益、对冲产品的近1年夏普比率，全市场分位数排名。")
-    lines.append("3. **风格偏离评分**：300/500/1000指增的近1年收益序列与对应指数相关性（正项，权重 70%），以及与万得小市值指数相关性（扣分项，权重 30%）。")
+    lines.append("1. **收益进攻评分**：300/500/1000指增及选股产品的近1年年化收益，按策略线分组做 min-max 线性比例打分（各组最大值 100 分、最小值 0 分，中间按数值比例线性插值）。")
+    lines.append("2. **收益质量评分**：300/500/1000指增的近1年信息比率（超额夏普比率）、对冲产品的近1年夏普比率，按策略线分组做 min-max 线性比例打分。")
+    lines.append("3. **风格偏离评分**：300/500/1000指增的近1年净值序列与对应指数点位序列的相关系数（累计收益口径），按策略线分组做 min-max（正项，权重 70%），以及与万得小市值指数相关系数（扣分项，权重 30%）。")
     lines.append("4. **产品覆盖奖励**：同一管理人产品数量越多，奖励系数越高；5 个产品 ×1.10，4 个 ×1.06，3 个 ×1.03，2 个 ×1.00。")
     lines.append("5. **综合分** = （进攻 + 质量 + 风格）/ 3 × 奖励系数。")
     lines.append("")

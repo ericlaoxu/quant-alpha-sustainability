@@ -2,13 +2,15 @@
 """评分层：将管理人原始指标映射为收益进攻、收益质量、风格偏离三维评分与综合分。
 
 评分口径：
-- 每个维度先对产品级指标做分位数排名（第一名 100 分，最后一名 0 分）。
+- 每个维度先对产品级指标做 0-100 线性比例打分（min-max 映射：最大值 100 分，最小值 0 分，中间按数值比例线性插值）。
+- **按策略线分组打分**：300指增/500指增/1000指增/选股/对冲 各自成池，同类指标在同一策略线池子内独立 min-max（避免跨策略线、跨量纲混排）。
 - 管理人在每个维度下的得分，为其旗下产品在该维度得分的均值。
 - 风格偏离评分 = 0.7 * 基准相关性分 + 0.3 * (100 - 小市值相关性分)。
 - 产品覆盖奖励：5 个产品齐全 ×1.10，4 个 ×1.06，3 个 ×1.03，2 个 ×1.00。
 - 综合分 = (攻击分 + 质量分 + 风格分) / 3 * 奖励系数，四舍五入到 0.1。
 """
 from __future__ import division
+from collections import defaultdict
 
 DIM_NAMES = {
     "attack": "收益进攻评分",
@@ -18,15 +20,22 @@ DIM_NAMES = {
 
 
 def _percentile_rank(values, higher_is_better=True):
-    """对产品指标做分位数排名，返回 0-100 的分数。"""
+    """对产品指标做 0-100 线性比例打分：最大值 100 分、最小值 0 分，中间按数值比例线性插值（min-max 映射），非按名次等距。"""
     valid = [(idx, float(v)) for idx, v in enumerate(values) if v is not None]
     if not valid:
         return [None] * len(values)
-    sorted_vals = sorted(valid, key=lambda x: x[1], reverse=higher_is_better)
-    n = len(sorted_vals)
+    vals = [v for _, v in valid]
+    vmin, vmax = min(vals), max(vals)
     out = [None] * len(values)
-    for rank, (idx, _) in enumerate(sorted_vals):
-        out[idx] = 100.0 * (n - 1 - rank) / (n - 1) if n > 1 else 100.0
+    if vmax == vmin:
+        for idx, _ in valid:
+            out[idx] = 100.0
+        return out
+    for idx, v in valid:
+        if higher_is_better:
+            out[idx] = 100.0 * (v - vmin) / (vmax - vmin)
+        else:
+            out[idx] = 100.0 * (vmax - v) / (vmax - vmin)
     return out
 
 
@@ -50,6 +59,9 @@ def _reward_factor(n_products):
 def score_all(metrics):
     """主入口：管理人原始指标 -> 三维评分与综合分。
 
+    打分规则：按策略线分组，每个策略线池子独立做 min-max 线性比例打分，
+    再按管理人聚合旗下产品得分均值。
+
     参数:
         metrics: metrics.compute_all 的输出。
     返回:
@@ -59,57 +71,52 @@ def score_all(metrics):
     if not managers:
         raise ValueError("无满足条件（至少 2 个产品）的管理人，无法评分")
 
-    # 收集所有产品指标用于全局分位数排名
-    attack_values = []
-    quality_values = []
-    bench_corr_values = []
-    smallcap_corr_values = []
+    def build_pools(getter):
+        """按策略线构建全局池子: strategy -> (values, owners[(mi, pi)])。"""
+        pools = defaultdict(list)
+        owners = defaultdict(list)
+        for mi, m in enumerate(managers):
+            for strat, vals in (getter(m) or {}).items():
+                for pi, v in enumerate(vals):
+                    pools[strat].append(v)
+                    owners[strat].append((mi, pi))
+        return pools, owners
 
-    attack_owners = []    # (manager_index, product_index_in_manager)
-    quality_owners = []
-    bench_corr_owners = []
-    smallcap_corr_owners = []
+    attack_pool, attack_own = build_pools(lambda m: m.get("attack_by_strategy"))
+    quality_pool, quality_own = build_pools(lambda m: m.get("quality_by_strategy"))
+    bench_pool, bench_own = build_pools(lambda m: m.get("bench_by_strategy"))
+    small_pool, small_own = build_pools(lambda m: m.get("small_by_strategy"))
 
-    for mi, m in enumerate(managers):
-        for pi, v in enumerate(m.get("attack_values", [])):
-            attack_values.append(v)
-            attack_owners.append((mi, pi))
-        for pi, v in enumerate(m.get("quality_values", [])):
-            quality_values.append(v)
-            quality_owners.append((mi, pi))
-        for pi, v in enumerate(m.get("bench_corr_values", [])):
-            bench_corr_values.append(v)
-            bench_corr_owners.append((mi, pi))
-        for pi, v in enumerate(m.get("smallcap_corr_values", [])):
-            smallcap_corr_values.append(v)
-            smallcap_corr_owners.append((mi, pi))
+    def rank_pools(pools, owners, higher_is_better=True):
+        """每个策略线独立做 min-max 线性比例打分，返回 owner -> score 映射。"""
+        out = {}
+        for strat, vals in pools.items():
+            ranks = _percentile_rank(vals, higher_is_better)
+            for owner, r in zip(owners[strat], ranks):
+                out[owner] = r
+        return out
 
-    # 全局分位数排名
-    attack_ranks = _percentile_rank(attack_values, higher_is_better=True)
-    quality_ranks = _percentile_rank(quality_values, higher_is_better=True)
-    bench_corr_ranks = _percentile_rank(bench_corr_values, higher_is_better=True)
-    smallcap_ranks = _percentile_rank(smallcap_corr_values, higher_is_better=True)
+    attack_ranks = rank_pools(attack_pool, attack_own, True)
+    quality_ranks = rank_pools(quality_pool, quality_own, True)
+    bench_ranks = rank_pools(bench_pool, bench_own, True)
+    small_ranks = rank_pools(small_pool, small_own, True)
 
-    # 将排名回填到每个管理人
+    # 将得分回填到每个管理人
     manager_scores = []
     for mi, m in enumerate(managers):
-        m_attack = []
-        m_quality = []
-        m_bench = []
-        m_small = []
+        def collect(ranks, getter):
+            scores = []
+            for strat, vals in (getter(m) or {}).items():
+                for pi in range(len(vals)):
+                    r = ranks.get((mi, pi))
+                    if r is not None:
+                        scores.append(r)
+            return scores
 
-        for rank, (rmi, rpi) in zip(attack_ranks, attack_owners):
-            if rmi == mi:
-                m_attack.append(rank)
-        for rank, (rmi, rpi) in zip(quality_ranks, quality_owners):
-            if rmi == mi:
-                m_quality.append(rank)
-        for rank, (rmi, rpi) in zip(bench_corr_ranks, bench_corr_owners):
-            if rmi == mi:
-                m_bench.append(rank)
-        for rank, (rmi, rpi) in zip(smallcap_ranks, smallcap_corr_owners):
-            if rmi == mi:
-                m_small.append(rank)
+        m_attack = collect(attack_ranks, lambda mm: mm.get("attack_by_strategy"))
+        m_quality = collect(quality_ranks, lambda mm: mm.get("quality_by_strategy"))
+        m_bench = collect(bench_ranks, lambda mm: mm.get("bench_by_strategy"))
+        m_small = collect(small_ranks, lambda mm: mm.get("small_by_strategy"))
 
         attack_score = _safe_mean(m_attack)
         quality_score = _safe_mean(m_quality)
@@ -146,10 +153,10 @@ def score_all(metrics):
                 "smallcap_corr": m_small,
             },
             "raw": {
-                "attack_values": m.get("attack_values", []),
-                "quality_values": m.get("quality_values", []),
-                "bench_corr_values": m.get("bench_corr_values", []),
-                "smallcap_corr_values": m.get("smallcap_corr_values", []),
+                "attack_by_strategy": m.get("attack_by_strategy", {}),
+                "quality_by_strategy": m.get("quality_by_strategy", {}),
+                "bench_by_strategy": m.get("bench_by_strategy", {}),
+                "small_by_strategy": m.get("small_by_strategy", {}),
             },
         })
 
