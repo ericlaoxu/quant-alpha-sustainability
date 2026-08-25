@@ -152,11 +152,8 @@
 │   ├── scoring.py              # 评分层
 │   └── run_alpha.py            # CLI 编排入口
 └── reports/                    # 测试报告与样本输出
-    ├── test_01_full_market.md
-    ├── test_02_selected.md
-    ├── test_03_historical.md
-    ├── test_04_workbuddy_full_market.md
-    ├── AI_Skill_测试报告_v3.pdf
+    ├── test_01_full_market.md          # v2.5 全市场运行 Markdown 测试报告
+    ├── AI_Skill_测试报告_v4.pdf       # v2.5 全市场运行 PDF 测试报告
     └── README_量化管理人综合能力评估助手.pdf
 ```
 

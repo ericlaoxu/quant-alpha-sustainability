@@ -557,13 +557,14 @@ def _create_doc(output_path: str):
     return doc
 
 
-def _cover_story():
+def _cover_story(title="量化管理人综合能力评估助手", subtitle="README 技术说明文档", show_version=True):
     story = []
     story.append(Spacer(1, 6 * cm))
-    story.append(Paragraph("量化管理人综合能力评估助手", STYLES["cover_title"]))
-    story.append(Paragraph("README 技术说明文档", STYLES["cover_subtitle"]))
+    story.append(Paragraph(title, STYLES["cover_title"]))
+    story.append(Paragraph(subtitle, STYLES["cover_subtitle"]))
     story.append(Spacer(1, 2 * cm))
-    story.append(Paragraph("版本：v2.0", STYLES["cover_meta"]))
+    if show_version:
+        story.append(Paragraph("版本：v2.5", STYLES["cover_meta"]))
     story.append(Paragraph(f"生成日期：{datetime.now().strftime('%Y-%m-%d')}", STYLES["cover_meta"]))
     story.append(Paragraph("项目仓库：https://github.com/ericlaoxu/quant-alpha-sustainability", STYLES["cover_meta"]))
     story.append(PageBreak())
@@ -600,7 +601,7 @@ def _toc_story(toc_entries):
     return story
 
 
-def build_pdf(readme_path: Path, output_path: Path):
+def build_pdf(readme_path: Path, output_path: Path, title=None, subtitle=None, show_version=True):
     with open(readme_path, "r", encoding="utf-8") as f:
         md_text = f.read()
 
@@ -611,20 +612,35 @@ def build_pdf(readme_path: Path, output_path: Path):
     def make_body():
         return MarkdownToFlowables().convert(ast)
 
+    # 从第一个 heading 提取默认标题
+    if title is None:
+        for node in ast:
+            if node.get("type") == "heading" and node.get("attrs", {}).get("level", 1) == 1:
+                title = MarkdownToFlowables()._inline_to_html(node.get("children", []))
+                title = re.sub(r"<[^>]+>", "", title)
+                break
+        if not title:
+            title = "量化管理人综合能力评估报告"
+    if subtitle is None:
+        subtitle = "测试报告"
+
+    def cover():
+        return _cover_story(title=title, subtitle=subtitle, show_version=show_version)
+
     # 第一次构建：仅封面 + 正文，收集二级标题页码
     temp_output = str(output_path) + ".tmp"
     doc1 = _create_doc(temp_output)
     doc1.collect_toc = True
-    story1 = _cover_story() + make_body()
+    story1 = cover() + make_body()
     doc1.multiBuild(story1)
 
     # 第二次构建比第一次多了一个目录页，因此正文页码整体 +1
-    toc_entries = [(title, page + 1) for title, page in doc1.toc_entries]
+    toc_entries = [(t, page + 1) for t, page in doc1.toc_entries]
 
     # 第二次构建：封面 + 目录 + 正文（不再重复收集目录条目）
     doc2 = _create_doc(str(output_path))
     doc2.collect_toc = False
-    story2 = _cover_story() + _toc_story(toc_entries) + make_body()
+    story2 = cover() + _toc_story(toc_entries) + make_body()
     doc2.multiBuild(story2)
 
     # 清理临时文件
@@ -637,8 +653,18 @@ def build_pdf(readme_path: Path, output_path: Path):
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="将 Markdown 渲染为专业 PDF")
+    parser.add_argument("--input", "-i", default="README.md", help="输入 Markdown 文件路径（默认 README.md）")
+    parser.add_argument("--output", "-o", required=True, help="输出 PDF 文件路径")
+    parser.add_argument("--title", "-t", default=None, help="封面主标题（默认取 Markdown 第一个一级标题）")
+    parser.add_argument("--subtitle", "-s", default=None, help="封面副标题")
+    parser.add_argument("--no-version", action="store_true", help="封面不显示版本号")
+    args = parser.parse_args()
+
     root = Path(__file__).resolve().parent.parent
-    readme = root / "README.md"
-    output = root / "reports" / "README_量化管理人综合能力评估助手.pdf"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    build_pdf(readme, output)
+    input_path = root / args.input
+    output_path = Path(args.output) if Path(args.output).is_absolute() else root / args.output
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    build_pdf(input_path, output_path, title=args.title, subtitle=args.subtitle, show_version=not args.no_version)
